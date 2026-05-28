@@ -1,3 +1,8 @@
-import express from "epxress";
-export { config } from "dotenv";
+import express from "express"; // ✅ Correct
+import { config } from "dotenv";
 
+config({ path: "./config/config.env" });
+
+const app = express();
+
+export default app;
