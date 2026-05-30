@@ -1,0 +1,111 @@
+import database from "../database/db.js";
+import { catchAsyncError } from "../middlewares/catchAsyncError.js";
+import ErrorHandler from "../middlewares/errorMiddleware.js";
+import bcrypt from "bcrypt";
+import crypto from "crypto";
+import { promisify } from "util";
+import { createTempToken } from "../utils/createToken.js";
+
+export const register = catchAsyncError(async (req, res, next) => {
+  const { name, email, password } = req.body;
+
+  if (!name || !email || !password) {
+    return next(new ErrorHandler("Please provide all required fields.", 400));
+  }
+
+  if (password.length < 8 || password.length > 16) {
+    return next(
+      new ErrorHandler("Password must be between 8 and 16 characters", 400),
+    );
+  }
+
+  const isAlreadyRegistered = await database.query(
+    `SELECT * FROM users WHERE email = $1`,
+    [email],
+  );
+
+  if (isAlreadyRegistered.rows.length > 0) {
+    return next(
+      new ErrorHandler("User already registered with this email", 400),
+    );
+  }
+
+  const hashedPassword = await bcrypt.hash(password, 10);
+
+  const userResult = await database.query(
+    "INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING *",
+    [name, password, hashedPassword],
+  );
+
+  const user = userResult.rows[0];
+
+  const randomBytesAsync = promisify(crypto.randomBytes);
+  const tokenBytes = await randomBytesAsync(48);
+  const token = tokenBytes.toString("hex");
+
+  const expiresAt = new Date();
+  expiresAt.setHours(expiresAt.getHours() + 1);
+
+  await database.query(
+    "INSERT INTO token_store (user_id, token, expires_at) VALUES ($1, $2, $3)",
+    [user.id, token, expiresAt],
+  );
+
+  res.status(201).json({
+    success: true,
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+    },
+    token,
+    tokenExpiresAt: expiresAt,
+  });
+});
+
+export const login = catchAsyncError(async (req, res, next) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return next(new ErrorHandler("Please provide email and password", 400));
+  }
+
+  const user = await database.query(`SELECT * FROM users WHERE email = $1`, [
+    email,
+  ]);
+
+  if (user.rows.length === 0) {
+    return next(new ErrorHandler("Invalid email or password.", 400));
+  }
+
+  const isPasswordPatch = await bcrypt.compare(password, user.rows[0].password);
+
+  if (!isPasswordPatch) {
+    return next(new ErrorHandler("Invalid email or password.", 401));
+  }
+
+  const token = createTempToken(32);
+  const userId = user.rows[0].id;
+
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+  await database.query(
+    `INSERT INTO token_store (user_id, token, expires_at) VALUES ($1, $2, $3)`,
+    [userId, token, expiresAt],
+  );
+
+  res.cookie("authToken", token, {
+    httpOnly: true,
+    maxAge: 1440 * 60 * 1000,
+    sameSite: "lax",
+  });
+
+  res.status(200).json({
+    success: true,
+    user: {
+      id: user.rows[0].id,
+      email: user.rows[0].email,
+    },
+    message: "Logged in.",
+  });
+});
